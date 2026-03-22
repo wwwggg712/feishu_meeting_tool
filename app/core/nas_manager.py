@@ -1,9 +1,21 @@
 import os
+import sys
 import json
 import shutil
-import pwd
 from pypinyin import lazy_pinyin
 from app.utils.logger import logger
+
+# ========== Windows兼容处理 ==========
+# 非Windows系统正常导入pwd，Windows下定义模拟类
+if sys.platform != "win32":
+    import pwd
+else:
+    # Windows下模拟pwd模块，避免导入报错
+    class pwd:
+        @staticmethod
+        def getpwuid(uid):
+            # 模拟返回值，避免KeyError
+            return type('PwdEntry', (object,), {'pw_name': ''})()
 
 class NasManager:
     # 容器映射路径 (对应宿主机 /vol1)
@@ -24,13 +36,18 @@ class NasManager:
     def _find_folder_by_owner_name(target_username):
         """
         遍历 /nas_data 下的所有目录，寻找 owner 是 target_username 的目录
-        例如: 目录 "1014" 的 owner 是 "zhangzixin"，则输入 "zhangzixin" 返回 "1014"
+        Windows下自动跳过UID/Owner匹配（无pwd支持），直接返回None
         """
+        # Windows系统直接跳过该逻辑（无UID/Owner概念）
+        if sys.platform == "win32":
+            logger.info("[NAS匹配] Windows系统跳过UID/Owner目录匹配")
+            return None
+            
         if not os.path.exists(NasManager.NAS_ROOT):
             return None
             
         try:
-            # 遍历一级子目录
+            # 遍历一级子目录 (仅非Windows系统执行)
             for item in os.listdir(NasManager.NAS_ROOT):
                 full_path = os.path.join(NasManager.NAS_ROOT, item)
                 if os.path.isdir(full_path):
@@ -55,15 +72,17 @@ class NasManager:
     def get_nas_folder(user_name, user_id):
         """
         根据用户姓名寻找 NAS 目录 (支持数字目录名+用户名归属匹配)
+        Windows下优先使用映射表和目录名匹配，跳过Owner匹配
         优先级:
         1. 手动映射表
-        2. 全拼匹配 (Owner Name)
-        3. 英文名匹配 (Owner Name)
+        2. 全拼匹配 (Owner Name，仅非Windows)
+        3. 英文名匹配 (Owner Name，仅非Windows)
+        4. 目录名直接匹配
         """
         if not user_name:
             return None
 
-        # 1. 查映射表
+        # 1. 查映射表 (优先级最高，跨平台通用)
         mapping = NasManager._load_mapping()
         # 1.1 精确匹配 user_id (人工手动配置的优先级最高)
         if user_id in mapping:
@@ -81,8 +100,6 @@ class NasManager:
         logger.info(f"[NAS匹配] 正在查找 Owner 为 '{pinyin_name}' 或 '{clean_name}' 的目录...")
 
         # 1.2 映射表匹配 (自动生成的 Host 用户名映射)
-        # 映射表中可能是 {"shelly": "1001", "zhangsan": "1002"}
-        # 注意：映射表中的 key 建议存为小写
         if pinyin_name in mapping:
             folder = mapping[pinyin_name]
             logger.info(f"[NAS匹配] 映射表由拼音命中: {pinyin_name} -> {folder}")
@@ -93,19 +110,18 @@ class NasManager:
             logger.info(f"[NAS匹配] 映射表由英文名命中: {clean_name} -> {folder}")
             return folder
 
-        # 2. 尝试按 Owner 查找 (拼音)
-        # 例如: 目录名为 "1014"，Owner 为 "zhangzixin"
+        # 2. 尝试按 Owner 查找 (仅非Windows系统执行)
         folder_by_pinyin = NasManager._find_folder_by_owner_name(pinyin_name)
         if folder_by_pinyin:
             return folder_by_pinyin
             
-        # 3. 尝试按 Owner 查找 (原名/英文名)
+        # 3. 尝试按 Owner 查找 (仅非Windows系统执行)
         if clean_name != pinyin_name:
              folder_by_raw = NasManager._find_folder_by_owner_name(clean_name)
              if folder_by_raw:
                  return folder_by_raw
 
-        # 4. 保底: 如果还是找不到，尝试直接匹配目录名 (兼容非数字目录的情况, 忽略大小写)
+        # 4. 保底: 目录名直接匹配 (跨平台通用，Windows下核心匹配逻辑)
         try:
             if os.path.exists(NasManager.NAS_ROOT):
                 for item in os.listdir(NasManager.NAS_ROOT):
@@ -117,11 +133,13 @@ class NasManager:
                              return item
         except Exception as e:
             logger.warning(f"[NAS匹配] 目录遍历匹配失败: {e}")
+        
+        return None
 
     @staticmethod
     def save_to_team_folder(source_file_path, department_names):
         """
-        将文件复制到团队文件夹
+        将文件复制到团队文件夹 (跨平台通用)
         :param source_file_path: 源文件路径 (已下载的视频文件)
         :param department_names: 部门名称列表 ["Skyris技术部门", "Skyris管理层"]
         """
@@ -148,11 +166,10 @@ class NasManager:
             else:
                 logger.debug(f"[NAS团队归档] 忽略: 团队文件夹不存在 ({dept_name})")
 
-
     @staticmethod
     def archive_file(local_file_path, user_name, user_id):
         """
-        将文件归档到 NAS
+        将文件归档到 NAS (跨平台通用)
         返回: (是否成功, 最终路径, 匹配到的文件夹名)
         """
         folder_name = NasManager.get_nas_folder(user_name, user_id)
@@ -169,12 +186,12 @@ class NasManager:
             # 移动文件
             shutil.move(local_file_path, nas_path)
             
-            # 修改权限 (确保 NAS 用户能读写，通常设为 6666 或 777)
-            # 注意：在 Docker 挂载卷中 chown 可能无效，但 chmod 通常可以
-            try:
-                os.chmod(nas_path, 0o666)
-            except Exception as e:
-                logger.warning(f"修改文件权限失败: {e}")
+            # 修改权限 (Windows下跳过chmod，无意义)
+            if sys.platform != "win32":
+                try:
+                    os.chmod(nas_path, 0o666)
+                except Exception as e:
+                    logger.warning(f"修改文件权限失败: {e}")
 
             logger.info(f"[NAS归档] 成功移动文件: {local_file_path} -> {nas_path}")
             return True, nas_path, folder_name

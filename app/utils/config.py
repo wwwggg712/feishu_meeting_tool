@@ -13,6 +13,6 @@ def load_config():
         "app_secret": os.getenv("APP_SECRET"),
         # 不再使用加密 Key
         "encrypt_key": "", 
-        "verification_token": os.getenv("APP_VERIFICATION_TOKEN", os.getenv("VERIFICATION_TOKEN")),
+        "verification_token": os.getenv("VERIFICATION_TOKEN"),
         "download_path": os.getenv("DOWNLOAD_PATH", "./downloads")
     }
